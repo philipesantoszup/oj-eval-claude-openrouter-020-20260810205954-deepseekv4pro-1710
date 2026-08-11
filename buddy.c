@@ -14,7 +14,7 @@ static int  *page_rank      = NULL;
 static void *pool           = NULL;
 static int   total_pages    = 0;
 
-/* Singly-linked free lists (like original, but char instead of int for page_allocated) */
+/* Doubly-linked free lists: each free block stores [next, prev] at offset 0 */
 static void *free_lists[MAX_RANK + 1];
 static int   free_count[MAX_RANK + 1];
 
@@ -28,19 +28,35 @@ static inline int buddy_offset(int offset, int rank) {
     return offset ^ (1 << (rank - 1));
 }
 
+/* Store free list pointers at the END of the block to avoid conflicts
+ * with any writes to the beginning of allocated blocks. */
+static inline void **get_next_ptr(void *addr) {
+    return (void **)((char *)addr + PAGE_SIZE - 16);
+}
+
+static inline void **get_prev_ptr(void *addr) {
+    return (void **)((char *)addr + PAGE_SIZE - 8);
+}
+
 static void remove_from_free_list(void *addr, int rank) {
-    void **curr = &free_lists[rank];
-    while (*curr) {
-        if (*curr == addr) {
-            *curr = *(void **)(*curr);
-            return;
-        }
-        curr = (void **)(*curr);
+    void *next = *get_next_ptr(addr);
+    void *prev = *get_prev_ptr(addr);
+    if (prev) {
+        *get_next_ptr(prev) = next;
+    } else {
+        free_lists[rank] = next;
+    }
+    if (next) {
+        *get_prev_ptr(next) = prev;
     }
 }
 
 static void add_to_free_list(void *addr, int rank) {
-    *(void **)addr = free_lists[rank];
+    *get_next_ptr(addr) = free_lists[rank];
+    *get_prev_ptr(addr) = NULL;
+    if (free_lists[rank]) {
+        *get_prev_ptr(free_lists[rank]) = addr;
+    }
     free_lists[rank] = addr;
 }
 
