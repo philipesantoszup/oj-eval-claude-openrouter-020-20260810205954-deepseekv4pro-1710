@@ -131,7 +131,7 @@ void *alloc_pages(int rank) {
 }
 
 int return_pages(void *p) {
-    if (p == NULL) return -EINVAL;
+    if (p == NULL || total_pages == 0 || page_rank == NULL) return -EINVAL;
     if ((char *)p < (char *)pool ||
         (char *)p >= (char *)pool + (unsigned long)total_pages * PAGE_SIZE)
         return -EINVAL;
@@ -163,6 +163,7 @@ int return_pages(void *p) {
         void *buddy_addr = (char *)pool + (unsigned long)buddy_off * PAGE_SIZE;
         remove_from_free_list(buddy_addr, rank);
         free_count[rank]--;
+        page_rank[buddy_off] = 0;   /* clear stale rank */
 
         /* merged block starts at the aligned offset */
         offset = offset & ~(1 << (rank - 1));
@@ -178,7 +179,7 @@ int return_pages(void *p) {
 }
 
 int query_ranks(void *p) {
-    if (p == NULL) return -EINVAL;
+    if (p == NULL || total_pages == 0 || page_rank == NULL) return -EINVAL;
     if ((char *)p < (char *)pool ||
         (char *)p >= (char *)pool + (unsigned long)total_pages * PAGE_SIZE)
         return -EINVAL;
