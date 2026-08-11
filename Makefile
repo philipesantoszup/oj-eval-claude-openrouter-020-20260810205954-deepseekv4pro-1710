@@ -1,3 +1,9 @@
-.PHONY: all
-all:
-	gcc -o test main.c buddy.c
+.PHONY: all clean
+
+all: code
+
+code: main.c buddy.c buddy.h utils.h
+	gcc-13 -std=c11 -O2 -Wall -o code main.c buddy.c
+
+clean:
+	rm -f code test
