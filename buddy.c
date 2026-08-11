@@ -14,7 +14,7 @@ static int  *page_rank      = NULL;
 static void *pool           = NULL;
 static int   total_pages    = 0;
 
-/* Doubly-linked free lists: each free block stores [next, prev] at its start */
+/* Singly-linked free lists (like original, but char instead of int for page_allocated) */
 static void *free_lists[MAX_RANK + 1];
 static int   free_count[MAX_RANK + 1];
 
@@ -29,24 +29,18 @@ static inline int buddy_offset(int offset, int rank) {
 }
 
 static void remove_from_free_list(void *addr, int rank) {
-    void *next = ((void **)addr)[0];
-    void *prev = ((void **)addr)[1];
-    if (prev) {
-        ((void **)prev)[0] = next;
-    } else {
-        free_lists[rank] = next;
-    }
-    if (next) {
-        ((void **)next)[1] = prev;
+    void **curr = &free_lists[rank];
+    while (*curr) {
+        if (*curr == addr) {
+            *curr = *(void **)(*curr);
+            return;
+        }
+        curr = (void **)(*curr);
     }
 }
 
 static void add_to_free_list(void *addr, int rank) {
-    ((void **)addr)[0] = free_lists[rank];
-    ((void **)addr)[1] = NULL;
-    if (free_lists[rank]) {
-        ((void **)free_lists[rank])[1] = addr;
-    }
+    *(void **)addr = free_lists[rank];
     free_lists[rank] = addr;
 }
 
@@ -82,7 +76,6 @@ int init_page(void *p, int pgcount) {
     for (int rank = MAX_RANK; rank >= 1 && remaining > 0; rank--) {
         int bp = block_pages(rank);
         while (remaining >= bp) {
-            /* mark all pages of this block */
             int j;
             for (j = offset; j < offset + bp; j++) {
                 page_rank[j] = rank;
@@ -125,13 +118,11 @@ void *alloc_pages(int rank) {
         int    buddy_off = offset + bp;
         void  *buddy     = (char *)pool + (unsigned long)buddy_off * PAGE_SIZE;
 
-        /* mark buddy pages as free */
         int j;
         for (j = buddy_off; j < buddy_off + bp; j++) {
             page_rank[j]      = r;
             page_allocated[j] = 0;
         }
-
         add_to_free_list(buddy, r);
         free_count[r]++;
 
@@ -141,10 +132,10 @@ void *alloc_pages(int rank) {
     /* mark the allocated block */
     {
         int bp = block_pages(rank);
-        memset(&page_allocated[offset], 1, (size_t)bp * sizeof(char));
         int j;
         for (j = offset; j < offset + bp; j++) {
-            page_rank[j] = rank;
+            page_allocated[j] = 1;
+            page_rank[j]      = rank;
         }
     }
 
@@ -171,7 +162,12 @@ int return_pages(void *p) {
     int bp = block_pages(rank);
 
     /* mark as free */
-    memset(&page_allocated[offset], 0, (size_t)bp * sizeof(char));
+    {
+        int j;
+        for (j = offset; j < offset + bp; j++) {
+            page_allocated[j] = 0;
+        }
+    }
 
     /* try to merge with buddy */
     while (rank < MAX_RANK) {
