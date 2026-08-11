@@ -1,13 +1,15 @@
 #include "buddy.h"
 #include <stdlib.h>
+#include <string.h>
 #define NULL ((void *)0)
 
 #define PAGE_SIZE    4096
 #define MAX_RANK     16
 
 /* ---- internal state ---- */
-static int  *page_allocated = NULL;   /* 1=allocated, 0=free */
-static int  *page_rank      = NULL;   /* rank of the block containing this page */
+static int  *page_allocated = NULL;   /* 1=allocated, 0=free  (accurate for every page) */
+static int  *page_rank      = NULL;   /* rank of the block; accurate ONLY at the first
+                                         page of each block.  Inner pages may be stale. */
 static void *pool           = NULL;   /* start of the managed memory */
 static int   total_pages    = 0;      /* number of 4K pages */
 
@@ -16,17 +18,14 @@ static int   free_count[MAX_RANK + 1];  /* how many free blocks of each rank */
 
 /* ---- helpers ---- */
 
-/* number of 4K pages in a block of given rank */
 static inline int block_pages(int rank) {
     return 1 << (rank - 1);
 }
 
-/* buddy offset (in pages) */
 static inline int buddy_offset(int offset, int rank) {
     return offset ^ (1 << (rank - 1));
 }
 
-/* remove a block from its free list */
 static void remove_from_free_list(void *addr, int rank) {
     void **curr = &free_lists[rank];
     while (*curr) {
@@ -38,7 +37,6 @@ static void remove_from_free_list(void *addr, int rank) {
     }
 }
 
-/* add a block at the front of its free list */
 static void add_to_free_list(void *addr, int rank) {
     *(void **)addr = free_lists[rank];
     free_lists[rank] = addr;
@@ -47,14 +45,12 @@ static void add_to_free_list(void *addr, int rank) {
 /* ---- public API ---- */
 
 int init_page(void *p, int pgcount) {
-    /* free previous metadata if any */
     if (page_allocated) { free(page_allocated); page_allocated = NULL; }
     if (page_rank)      { free(page_rank);      page_rank      = NULL; }
 
     pool        = p;
     total_pages = pgcount;
 
-    /* clear free lists */
     int i;
     for (i = 1; i <= MAX_RANK; i++) {
         free_lists[i] = NULL;
@@ -72,19 +68,15 @@ int init_page(void *p, int pgcount) {
         return -ENOSPC;
     }
 
-    /* Split the whole range into maximal power-of-2 blocks */
+    /* Split the whole range into maximal power-of-2 blocks.
+     * Only set page_rank at the first page of each block. */
     int remaining = pgcount;
     int offset    = 0;
 
     for (int rank = MAX_RANK; rank >= 1 && remaining > 0; rank--) {
         int bp = block_pages(rank);
         while (remaining >= bp) {
-            /* mark all pages of this block */
-            int j;
-            for (j = offset; j < offset + bp; j++) {
-                page_rank[j] = rank;
-                /* page_allocated already 0 from calloc */
-            }
+            page_rank[offset] = rank;   /* first page only */
 
             void *addr = (char *)pool + (unsigned long)offset * PAGE_SIZE;
             add_to_free_list(addr, rank);
@@ -101,7 +93,6 @@ int init_page(void *p, int pgcount) {
 void *alloc_pages(int rank) {
     if (rank < 1 || rank > MAX_RANK) return ERR_PTR(-EINVAL);
 
-    /* find the smallest rank >= requested rank that has a free block */
     int r;
     for (r = rank; r <= MAX_RANK; r++) {
         if (free_lists[r] != NULL) break;
@@ -109,7 +100,6 @@ void *alloc_pages(int rank) {
 
     if (r > MAX_RANK) return ERR_PTR(-ENOSPC);
 
-    /* take the block from its free list */
     void *block = free_lists[r];
     remove_from_free_list(block, r);
     free_count[r]--;
@@ -121,37 +111,33 @@ void *alloc_pages(int rank) {
         r--;
         int bp = block_pages(r);
 
-        /* the buddy is the second half */
         int    buddy_off = offset + bp;
         void  *buddy     = (char *)pool + (unsigned long)buddy_off * PAGE_SIZE;
 
-        /* mark buddy as free */
-        int j;
-        for (j = buddy_off; j < buddy_off + bp; j++) {
-            page_rank[j]      = r;
-            page_allocated[j] = 0;
-        }
+        /* mark buddy's first page only */
+        page_rank[buddy_off] = r;
+        page_allocated[buddy_off] = 0;
         add_to_free_list(buddy, r);
         free_count[r]++;
 
-        /* first half (offset unchanged) continues to be split */
+        /* first half continues to be split */
     }
 
-    /* mark the final block as allocated */
+    /* mark the allocated block: set allocated flag for every page,
+     * set rank only at the first page */
     {
         int bp = block_pages(rank);
         int j;
         for (j = offset; j < offset + bp; j++) {
             page_allocated[j] = 1;
-            page_rank[j]      = rank;
         }
+        page_rank[offset] = rank;
     }
 
     return block;
 }
 
 int return_pages(void *p) {
-    /* validate address */
     if (p == NULL) return -EINVAL;
     if ((char *)p < (char *)pool ||
         (char *)p >= (char *)pool + (unsigned long)total_pages * PAGE_SIZE)
@@ -165,16 +151,20 @@ int return_pages(void *p) {
     /* must be the start of an allocated block */
     if (!page_allocated[offset]) return -EINVAL;
 
+    /* find the rank of this allocated block */
     int rank = page_rank[offset];
-    int bp   = block_pages(rank);
+    if (rank < 1 || rank > MAX_RANK) return -EINVAL;
 
-    /* mark as free */
+    int bp = block_pages(rank);
+
+    /* mark all pages of the block as free */
     {
         int j;
         for (j = offset; j < offset + bp; j++) {
             page_allocated[j] = 0;
         }
     }
+    /* page_rank[offset] stays – it is still the correct rank for the free block */
 
     /* try to merge with buddy */
     while (rank < MAX_RANK) {
@@ -193,12 +183,8 @@ int return_pages(void *p) {
         offset = offset & ~(1 << (rank - 1));
         rank++;
 
-        /* update metadata for the merged block */
-        bp = block_pages(rank);
-        int j;
-        for (j = offset; j < offset + bp; j++) {
-            page_rank[j] = rank;
-        }
+        /* update rank only at the first page of the merged block */
+        page_rank[offset] = rank;
     }
 
     /* add the (possibly merged) block to the free list */
@@ -218,7 +204,30 @@ int query_ranks(void *p) {
     if (diff % PAGE_SIZE != 0) return -EINVAL;
 
     int offset = (int)(diff / PAGE_SIZE);
-    return page_rank[offset];
+
+    if (page_allocated[offset]) {
+        /* allocated page: find the block start by scanning alignment */
+        int r;
+        for (r = MAX_RANK; r >= 1; r--) {
+            int bs = offset & ~(block_pages(r) - 1);
+            if (page_allocated[bs] && page_rank[bs] == r) {
+                return r;
+            }
+        }
+        /* fallback: should not reach here */
+        return page_rank[offset];
+    } else {
+        /* free page: find the containing free block */
+        int r;
+        for (r = MAX_RANK; r >= 1; r--) {
+            int bs = offset & ~(block_pages(r) - 1);
+            if (bs < total_pages && !page_allocated[bs] && page_rank[bs] == r) {
+                return r;
+            }
+        }
+        /* fallback */
+        return page_rank[offset];
+    }
 }
 
 int query_page_counts(int rank) {
