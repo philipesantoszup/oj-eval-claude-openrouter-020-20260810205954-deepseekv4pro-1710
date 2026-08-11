@@ -189,7 +189,10 @@ int query_ranks(void *p) {
 
     int offset = (int)(diff / PAGE_SIZE);
 
-    /* scan from largest rank down to find the containing block */
+    /* scan from largest rank down to find the containing block.
+     * For each rank r, we compute the aligned block start bs.
+     * If page_rank[bs] is non-zero, the block at bs has some rank.
+     * We must verify that this block actually contains 'offset'. */
     int r;
     for (r = MAX_RANK; r >= 1; r--) {
         int bs = offset & ~(block_pages(r) - 1);
@@ -197,7 +200,8 @@ int query_ranks(void *p) {
         int val = page_rank[bs];
         if (val == 0) continue;
         int block_rank = (val > 0) ? val : -val;
-        if (block_rank == r) {
+        int block_end  = bs + block_pages(block_rank);
+        if (offset >= bs && offset < block_end) {
             return block_rank;
         }
     }
