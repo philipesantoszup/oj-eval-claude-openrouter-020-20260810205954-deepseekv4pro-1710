@@ -128,9 +128,9 @@ void *alloc_pages(int rank) {
         /* mark buddy pages as free */
         int j;
         for (j = buddy_off; j < buddy_off + bp; j++) {
-            page_rank[j] = r;
+            page_rank[j]      = r;
+            page_allocated[j] = 0;
         }
-        /* page_allocated already 0 from calloc for buddy pages */
 
         add_to_free_list(buddy, r);
         free_count[r]++;
